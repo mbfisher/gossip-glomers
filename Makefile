@@ -1,11 +1,14 @@
-.PHONY: clean serve
+.PHONY: clean serve maelstrom-echo maelstrom-unique-ids
 
 BREW_PREFIX := $(shell brew --prefix)
+
+maelstrom-unique-ids: gossip-glomers maelstrom/maelstrom
+	./maelstrom/maelstrom test -w unique-ids --bin ./gossip-glomers --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
 
 maelstrom-echo: gossip-glomers maelstrom/maelstrom
 	./maelstrom/maelstrom test -w echo --bin ./gossip-glomers --node-count 1 --time-limit 10
 
-gossip-glomers: main.go
+gossip-glomers: *.go
 	go build .
 
 maelstrom/maelstrom: $(BREW_PREFIX)/Cellar/graphviz $(BREW_PREFIX)/Cellar/gnuplot

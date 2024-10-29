@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 	"log"
 )
@@ -10,15 +9,11 @@ func main() {
 	n := maelstrom.NewNode()
 
 	n.Handle("echo", func(msg maelstrom.Message) error {
-		var body map[string]any
+		return echo(n, msg)
+	})
 
-		if err := json.Unmarshal(msg.Body, &body); err != nil {
-			return err
-		}
-
-		body["type"] = "echo_ok"
-
-		return n.Reply(msg, body)
+	n.Handle("generate", func(msg maelstrom.Message) error {
+		return generate(n, msg)
 	})
 
 	if err := n.Run(); err != nil {
