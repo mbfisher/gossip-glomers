@@ -2,7 +2,10 @@
 
 BREW_PREFIX := $(shell brew --prefix)
 
-maelstrom-broadcast: gossip-glomers maelstrom/maelstrom
+maelstrom-multi-node-broadcast: gossip-glomers maelstrom/maelstrom
+	./maelstrom/maelstrom test -w broadcast --bin ./gossip-glomers --node-count 5 --time-limit 20 --rate 10
+
+maelstrom-single-node-broadcast: gossip-glomers maelstrom/maelstrom
 	./maelstrom/maelstrom test -w broadcast --bin ./gossip-glomers --node-count 1 --time-limit 20 --rate 10
 
 maelstrom-unique-ids: gossip-glomers maelstrom/maelstrom
