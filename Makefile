@@ -2,6 +2,9 @@
 
 BREW_PREFIX := $(shell brew --prefix)
 
+maelstrom-fault-tolerant-broadcast: gossip-glomers maelstrom/maelstrom
+	./maelstrom/maelstrom test -w broadcast --bin ./gossip-glomers --node-count 5 --time-limit 20 --rate 10 --nemesis partition
+
 maelstrom-multi-node-broadcast: gossip-glomers maelstrom/maelstrom
 	./maelstrom/maelstrom test -w broadcast --bin ./gossip-glomers --node-count 5 --time-limit 20 --rate 10
 
