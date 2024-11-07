@@ -3,13 +3,27 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"log"
+	"net/http"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type BroadcastMessageBody struct {
-	Message int
+	Message    int
+	MsgId      int   `json:"msg_id,omitempty"`
+	ReceivedAt int64 `json:"received_at,omitempty"`
 }
 
 type BroadcastMessage struct {
@@ -23,10 +37,63 @@ type TopologyMessageBody struct {
 	Topology Topology
 }
 
+var (
+	replicationQueueSize = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "replication_queue_size",
+		},
+		[]string{"src", "dest"},
+	)
+	replicationAttempts = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "replication_attempts_total",
+		},
+		[]string{"src", "dest"},
+	)
+	replicationErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "replication_errors_total",
+		},
+		[]string{"src", "dest"},
+	)
+	replicatedMessages = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "replicated_messages_total",
+		},
+		[]string{"src", "dest"},
+	)
+	messagesReceived = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "messages_received_total",
+		},
+		[]string{"dest", "type", "src"},
+	)
+	replicationLag = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "replication_lag_millis",
+			Buckets: []float64{
+				50,
+				100,
+				250,
+				500,
+				1000,
+			},
+		},
+		[]string{"src", "dest"},
+	)
+	storeSize = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "store_size",
+		},
+		[]string{"node"},
+	)
+)
+
 // MessageStore keeps track of which messages we've received, replicates them to other nodes, and supports concurrent
 // reads and writes.
 type MessageStore struct {
 	mutex sync.Mutex
+	node  *maelstrom.Node
 	// We trade off memory usage for throughput by storing messages in both a set and a slice, giving us constant time
 	// reads and writes.
 	hashMap          map[int]bool
@@ -35,19 +102,30 @@ type MessageStore struct {
 }
 
 func (s *MessageStore) Initialize(n *maelstrom.Node, topology Topology) {
+	s.node = n
 	s.replicationQueue = startReplicationWorkers(n, topology[n.ID()])
 }
 
 func (s *MessageStore) Write(message BroadcastMessage) bool {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	_, ok := s.hashMap[message.Body.Message]
 
 	if !ok {
 		s.hashMap[message.Body.Message] = true
 		s.slice = append(s.slice, message.Body.Message)
+		storeSize.WithLabelValues(s.node.ID()).Inc()
+	}
+
+	s.mutex.Unlock()
+
+	// Inter-server messages don't need to be replicated
+	if strings.HasPrefix(message.Src, "c") {
 		s.replicationQueue <- message
+	}
+
+	if message.Body.ReceivedAt > 0 {
+		replicationLag.WithLabelValues(message.Src, s.node.ID()).Observe(float64(time.Now().UTC().UnixMilli() - message.Body.ReceivedAt))
 	}
 
 	return !ok
@@ -73,13 +151,81 @@ func newMessageStore() *MessageStore {
 func broadcast(n *maelstrom.Node) {
 	store := newMessageStore()
 
+	reg := prometheus.NewRegistry()
+
+	reg.MustRegister(
+		replicationQueueSize,
+		replicationAttempts,
+		replicatedMessages,
+		replicationErrors,
+		messagesReceived,
+		replicationLag,
+		storeSize,
+		collectors.NewGoCollector(
+			collectors.WithGoCollectorRuntimeMetrics(
+				collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile("/sched/latencies:seconds")},
+			),
+		),
+	)
+
+	http.Handle("/metrics", promhttp.HandlerFor(
+		reg,
+		promhttp.HandlerOpts{
+			// Opt into OpenMetrics to support exemplars.
+			EnableOpenMetrics: true,
+		}),
+	)
+
 	n.Handle("topology", func(msg maelstrom.Message) error {
 		var body TopologyMessageBody
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
 
-		store.Initialize(n, body.Topology)
+		// Default topology :grid
+		// 00 - 01 - 02 - 03 - 04
+		// |    |    |    |    |
+		// 05 - 06 - 07 - 08 - 09
+		// |    |    |    |    |
+		// 10 - 11 - 12 - 13 - 14
+		// |    |    |    |    |
+		// 15 - 16 - 17 - 18 - 19
+		// |    |    |    |    |
+		// 20 - 21 - 22 - 23 - 24
+
+		nodeCount := len(body.Topology)
+		everyNodeIsMyNeighbourTopology := make(Topology)
+
+		for src := 0; src < nodeCount; src++ {
+			for dest := 0; dest < nodeCount; dest++ {
+				if src == dest {
+					continue
+				}
+
+				srcId := fmt.Sprintf("n%d", src)
+				destId := fmt.Sprintf("n%d", dest)
+
+				if _, ok := everyNodeIsMyNeighbourTopology[srcId]; !ok {
+					everyNodeIsMyNeighbourTopology[srcId] = make([]string, 0, nodeCount-1)
+				}
+
+				everyNodeIsMyNeighbourTopology[srcId] = append(everyNodeIsMyNeighbourTopology[srcId], destId)
+			}
+		}
+
+		store.Initialize(n, everyNodeIsMyNeighbourTopology)
+
+		id, err := strconv.Atoi(strings.TrimPrefix(n.ID(), "n"))
+		if err != nil {
+			panic(err)
+		}
+
+		metricsPort := fmt.Sprintf("localhost:211%d", id)
+
+		go func() {
+			log.Printf("Prometheus listening on %s\n", metricsPort)
+			log.Fatal(http.ListenAndServe(metricsPort, nil))
+		}()
 
 		return n.Reply(msg, map[string]any{
 			"type": "topology_ok",
@@ -95,26 +241,32 @@ func broadcast(n *maelstrom.Node) {
 			return err
 		}
 
+		log.Printf("%s received %d from %s", n.ID(), message.Body.Message, msg.Src)
+		message.Body.ReceivedAt = time.Now().UTC().UnixMilli()
 		store.Write(message)
+
+		messagesReceived.WithLabelValues(n.ID(), "broadcast", msg.Src).Inc()
 
 		return n.Reply(msg, map[string]any{
 			"type": "broadcast_ok",
 		})
 	})
 
-	handle(n, "read", func(body map[string]any) (reply any, err error) {
-		reply = map[string]any{
+	n.Handle("read", func(msg maelstrom.Message) error {
+		messagesReceived.WithLabelValues(n.ID(), "read", msg.Src).Inc()
+
+		return n.Reply(msg, map[string]any{
 			"type":     "read_ok",
 			"messages": store.Read(),
-		}
-
-		return
+		})
 	})
-
 }
 
 func startReplicationWorkers(n *maelstrom.Node, neighbours []string) chan<- BroadcastMessage {
 	input := make(chan BroadcastMessage, 128)
+	sort.Strings(neighbours)
+
+	log.Printf("%s replicating to %v\n", n.ID(), neighbours)
 
 	neighbourChans := make(map[string]chan BroadcastMessage)
 	for _, neighbour := range neighbours {
@@ -154,9 +306,13 @@ func replicationWorker(n *maelstrom.Node, dest string, input <-chan BroadcastMes
 	go func() {
 		for message := range queue {
 			request := map[string]any{
-				"type":    "broadcast",
-				"message": message.Body.Message,
+				"type":        "broadcast",
+				"message":     message.Body.Message,
+				"received_at": message.Body.ReceivedAt,
 			}
+
+			log.Printf("%s replicating %d to %s", n.ID(), message.Body.Message, dest)
+			replicationAttempts.WithLabelValues(n.ID(), dest).Add(1)
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
@@ -164,12 +320,17 @@ func replicationWorker(n *maelstrom.Node, dest string, input <-chan BroadcastMes
 			reply, err := n.SyncRPC(ctx, dest, request)
 
 			if err != nil || reply.Type() != "broadcast_ok" {
+				replicationErrors.WithLabelValues(n.ID(), dest).Inc()
 				queue <- message
+			} else {
+				replicationQueueSize.WithLabelValues(n.ID(), dest).Sub(1)
+				replicatedMessages.WithLabelValues(n.ID(), dest).Inc()
 			}
 		}
 	}()
 
 	for message := range input {
 		queue <- message
+		replicationQueueSize.WithLabelValues(n.ID(), dest).Add(1)
 	}
 }

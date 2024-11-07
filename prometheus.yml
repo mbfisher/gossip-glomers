@@ -1,0 +1,30 @@
+scrape_configs:
+  - job_name: gossipglomers
+    scrape_interval: 1s
+    static_configs:
+      - targets:
+        - host.docker.internal:2110
+        - host.docker.internal:2111
+        - host.docker.internal:2112
+        - host.docker.internal:2113
+        - host.docker.internal:2114
+        - host.docker.internal:2115
+        - host.docker.internal:2116
+        - host.docker.internal:2117
+        - host.docker.internal:2118
+        - host.docker.internal:2119
+        - host.docker.internal:21110
+        - host.docker.internal:21111
+        - host.docker.internal:21112
+        - host.docker.internal:21113
+        - host.docker.internal:21114
+        - host.docker.internal:21115
+        - host.docker.internal:21116
+        - host.docker.internal:21117
+        - host.docker.internal:21118
+        - host.docker.internal:21119
+        - host.docker.internal:21120
+        - host.docker.internal:21121
+        - host.docker.internal:21122
+        - host.docker.internal:21123
+        - host.docker.internal:21124
