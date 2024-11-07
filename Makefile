@@ -1,6 +1,9 @@
-.PHONY: clean serve maelstrom-echo maelstrom-unique-ids
+.PHONY: clean serve
 
 BREW_PREFIX := $(shell brew --prefix)
+
+maelstrom-efficient-broadcast-part-i: gossip-glomers maelstrom/maelstrom
+	./maelstrom/maelstrom test -w broadcast --bin ./gossip-glomers --node-count 25 --time-limit 20 --rate 100 --latency 100
 
 maelstrom-fault-tolerant-broadcast: gossip-glomers maelstrom/maelstrom
 	./maelstrom/maelstrom test -w broadcast --bin ./gossip-glomers --node-count 5 --time-limit 20 --rate 10 --nemesis partition
